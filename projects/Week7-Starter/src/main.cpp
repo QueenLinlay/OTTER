@@ -75,7 +75,7 @@ GLFWwindow* window;
 // The current size of our window in pixels
 glm::ivec2 windowSize = glm::ivec2(800, 800);
 // The title of our GLFW window
-std::string windowTitle = "INFR-1350U";
+std::string windowTitle = "Justin Lee - 100658626";
 
 void GlfwWindowResizedCallback(GLFWwindow* window, int width, int height) {
 	glViewport(0, 0, width, height);
@@ -591,9 +591,11 @@ int main() {
 			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" },
 			{ ShaderPartType::Fragment, "shaders/frag_blinn_phong_textured.glsl" }
 		});
+		Guid weirdMesh = ResourceManager::CreateMesh("WeirdMonkey.obj");
 		Guid monkeyMesh = ResourceManager::CreateMesh("Monkey.obj");
 		Guid boxTexture = ResourceManager::CreateTexture("textures/box-diffuse.png");
 		Guid monkeyTex  = ResourceManager::CreateTexture("textures/monkey-uvMap.png");
+		Guid extraTex = ResourceManager::CreateTexture("textures/DarkGrey.jpg");
 
 		// Save the asset manifest for all the resources we just loaded
 		ResourceManager::SaveManifest("manifest.json");
@@ -616,6 +618,14 @@ int main() {
 		monkeyMaterial->Texture = ResourceManager::GetTexture(monkeyTex);
 		monkeyMaterial->Shininess = 1.0f;
 		scene->Materials[monkeyMaterial->GetGUID()] = monkeyMaterial;
+
+		MaterialInfo::Sptr extraMonkeyMaterial = std::make_shared<MaterialInfo>();
+		extraMonkeyMaterial->Shader = scene->BaseShader;
+		extraMonkeyMaterial->Texture = ResourceManager::GetTexture(extraTex);
+		extraMonkeyMaterial->Shininess = 2.0f;
+		scene->Materials[extraMonkeyMaterial->GetGUID()] = extraMonkeyMaterial;
+		
+
 
 		// Create some lights for our scene
 		scene->Lights.resize(3);
@@ -664,6 +674,16 @@ int main() {
 		monkey2.Name = "Monkey 2";
 		scene->Objects.push_back(monkey2);
 
+		RenderObject weirdmonkey= RenderObject();
+		weirdmonkey.Position = glm::vec3(0.0f, 3.0f, 2.0f);
+		weirdmonkey.Mesh = ResourceManager::GetMesh(weirdMesh);
+		weirdmonkey.Material = extraMonkeyMaterial;
+		weirdmonkey.Rotation.z = 180.0f;
+		weirdmonkey.Scale = glm::vec3(1.5f, 1.5f, 1.5f);
+		weirdmonkey.Name = "Weird Monkey";
+	
+		scene->Objects.push_back(weirdmonkey);
+
 		// Save the scene to a JSON file
 		scene->Save("scene.json");
 	}
@@ -673,6 +693,7 @@ int main() {
 
 	RenderObject* monkey1 = scene->FindObjectByName("Monkey 1");
 	RenderObject* monkey2 = scene->FindObjectByName("Monkey 2");
+	RenderObject* weirdmonkey = scene->FindObjectByName("Weird Monkey");
 
 	// We'll use this to allow editing the save/load path
 	// via ImGui, note the reserve to allocate extra space
@@ -709,6 +730,7 @@ int main() {
 				// Re-fetch the monkeys so we can do a behaviour for them
 				monkey1 = scene->FindObjectByName("Monkey 1");
 				monkey2 = scene->FindObjectByName("Monkey 2");
+				weirdmonkey = scene->FindObjectByName("Weird Monkey");
 			}
 			ImGui::Separator();
 		}
@@ -717,6 +739,7 @@ int main() {
 		if (isRotating) {
 			monkey1->Rotation += glm::vec3(0.0f, 0.0f, dt * 90.0f);
 			monkey2->Rotation -= glm::vec3(0.0f, 0.0f, dt * 90.0f); 
+			weirdmonkey->Rotation += glm::vec3(0.0f, 0.0f, dt * 90.0f);
 		}
 
 		// Clear the color and depth buffers
