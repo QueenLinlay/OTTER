@@ -25,6 +25,7 @@
 #include "Graphics/VertexArrayObject.h"
 #include "Graphics/Shader.h"
 #include "Graphics/Texture2D.h"
+#include "Graphics/TextureCube.h"
 #include "Graphics/VertexTypes.h"
 
 // Utilities
@@ -58,7 +59,9 @@
 #include "Gameplay/Physics/Colliders/SphereCollider.h"
 #include "Gameplay/Physics/Colliders/ConvexMeshCollider.h"
 #include "Gameplay/Physics/TriggerVolume.h"
-#include "../../Week8-Completed/src/Graphics/DebugDraw.h"
+#include "Graphics/DebugDraw.h"
+#include "Gameplay/Components/TriggerVolumeEnterBehaviour.h"
+#include "Gameplay/Components/SimpleCameraControl.h"
 
 //#define LOG_GL_NOTIFICATIONS
 
@@ -92,12 +95,12 @@ void GlDebugMessage(GLenum source, GLenum type, GLuint id, GLenum severity, GLsi
 			#endif
 		default: break;
 	}
-}
+}  
 
 // Stores our GLFW window in a global variable for now
 GLFWwindow* window;
 // The current size of our window in pixels
-glm::ivec2 windowSize = glm::ivec2(1920, 1080);
+glm::ivec2 windowSize = glm::ivec2(800, 800);
 // The title of our GLFW window
 std::string windowTitle = "INFR-1350U";
 
@@ -164,6 +167,9 @@ bool DrawSaveLoadImGui(Scene::Sptr& scene, std::string& path) {
 	// Draw a save button, and save when pressed
 	if (ImGui::Button("Save")) {
 		scene->Save(path);
+
+		std::string newFilename = std::filesystem::path(path).stem().string() + "-manifest.json";
+		ResourceManager::SaveManifest(newFilename);
 	}
 	ImGui::SameLine();
 	// Load scene from file button
@@ -171,6 +177,9 @@ bool DrawSaveLoadImGui(Scene::Sptr& scene, std::string& path) {
 		// Since it's a reference to a ptr, this will
 		// overwrite the existing scene!
 		scene = nullptr;
+
+		std::string newFilename = std::filesystem::path(path).stem().string() + "-manifest.json";
+		ResourceManager::LoadManifest(newFilename);
 		scene = Scene::Load(path);
 
 		return true;
@@ -204,21 +213,6 @@ bool DrawLightImGui(const Scene::Sptr& scene, const char* title, int ix) {
 	return result;
 }
 
-GLfloat MoveX = 1.5f;
-GLfloat MoveY = 0.0f;
-
-void keyboard()
-{
-	if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)
-		MoveY += 0.5f;
-	if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS)
-		MoveY -= 0.5f;
-	if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS)
-		MoveX += 0.5f;
-	if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS)
-		MoveX -= 0.5f;
-}	
-
 int main() {
 	Logger::Init(); // We'll borrow the logger from the toolkit, but we need to initialize it
 
@@ -243,9 +237,10 @@ int main() {
 
 	// Register all our resource types so we can load them from manifest files
 	ResourceManager::RegisterType<Texture2D>();
+	ResourceManager::RegisterType<TextureCube>();
+	ResourceManager::RegisterType<Shader>();
 	ResourceManager::RegisterType<Material>();
 	ResourceManager::RegisterType<MeshResource>();
-	ResourceManager::RegisterType<Shader>();
 
 	// Register all of our component types so we can load them from files
 	ComponentManager::RegisterType<Camera>();
@@ -255,6 +250,8 @@ int main() {
 	ComponentManager::RegisterType<RotatingBehaviour>();
 	ComponentManager::RegisterType<JumpBehaviour>();
 	ComponentManager::RegisterType<MaterialSwapBehaviour>();
+	ComponentManager::RegisterType<TriggerVolumeEnterBehaviour>();
+	ComponentManager::RegisterType<SimpleCameraControl>();
 
 	// GL states, we'll enable depth testing and backface fulling
 	glEnable(GL_DEPTH_TEST);
@@ -267,53 +264,90 @@ int main() {
 	if (loadScene) {
 		ResourceManager::LoadManifest("manifest.json");
 		scene = Scene::Load("scene.json");
+
+		// Call scene awake to start up all of our components
+		scene->Window = window;
+		scene->Awake();
 	} 
 	else {
-		// Create our OpenGL resources
-		Shader::Sptr uboShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
-			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" }, 
-			{ ShaderPartType::Fragment, "shaders/frag_blinn_phong_textured.glsl" }
+		// This time we'll have 2 different shaders, and share data between both of them using the UBO
+		// This shader will handle reflective materials
+		Shader::Sptr reflectiveShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" },  
+			{ ShaderPartType::Fragment, "shaders/frag_environment_reflective.glsl" }  
 		}); 
 
+		// This shader handles our basic materials without reflections (cause they expensive)
+		Shader::Sptr basicShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" },
+			{ ShaderPartType::Fragment, "shaders/frag_blinn_phong_textured.glsl" }
+		});
+
+		//Black and White refection none;
+		Shader::Sptr reflectiveBWshader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" },
+			{ ShaderPartType::Fragment, "shaders/frag_environment_reflective_Mine.glsl" }
+		});
+
 		MeshResource::Sptr monkeyMesh = ResourceManager::CreateAsset<MeshResource>("Monkey.obj");
-		Texture2D::Sptr    boxTexture = ResourceManager::CreateAsset<Texture2D>("textures/Menu.png");
+		Texture2D::Sptr    boxTexture = ResourceManager::CreateAsset<Texture2D>("textures/box-diffuse.png");
 		Texture2D::Sptr    monkeyTex  = ResourceManager::CreateAsset<Texture2D>("textures/monkey-uvMap.png");  
-		
+		Texture2D::Sptr    UnknownBW = ResourceManager::CreateAsset<Texture2D>("textures/box-specular.png");
+
+		// Here we'll load in the cubemap, as well as a special shader to handle drawing the skybox
+		TextureCube::Sptr testCubemap = ResourceManager::CreateAsset<TextureCube>("cubemaps/ocean/ocean.jpg");
+		Shader::Sptr      skyboxShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/skybox_vert.glsl" },
+			{ ShaderPartType::Fragment, "shaders/skybox_frag.glsl" }
+		});   
+		 
 		// Create an empty scene
 		scene = std::make_shared<Scene>();
 
-		// I hate this
-		scene->BaseShader = uboShader;
+		// Setting up our enviroment map
+		scene->SetSkyboxTexture(testCubemap);
+		scene->SetSkyboxShader(skyboxShader);
+		// Since the skybox I used was for Y-up, we need to rotate it 90 deg around the X-axis to convert it to z-up
+		scene->SetSkyboxRotation(glm::rotate(MAT4_IDENTITY, glm::half_pi<float>(), glm::vec3(1.0f, 0.0f, 0.0f)));
 
 		// Create our materials
+		// This will be our box material, with no environment reflections
 		Material::Sptr boxMaterial = ResourceManager::CreateAsset<Material>();
 		{
 			boxMaterial->Name = "Box";
-			boxMaterial->MatShader = scene->BaseShader;
+			boxMaterial->MatShader = basicShader; 
 			boxMaterial->Texture = boxTexture;
-			boxMaterial->Shininess = 2.0f;
+			boxMaterial->Shininess = 0.1f;  
 		}	
-
+		 
+		// This will be the reflective material, we'll make the whole thing 90% reflective
 		Material::Sptr monkeyMaterial = ResourceManager::CreateAsset<Material>();
 		{
 			monkeyMaterial->Name = "Monkey";
-			monkeyMaterial->MatShader = scene->BaseShader;
-			monkeyMaterial->Texture = monkeyTex;
-			monkeyMaterial->Shininess = 256.0f;
+			monkeyMaterial->MatShader = reflectiveShader;
+			monkeyMaterial->Texture = monkeyTex; 
+			monkeyMaterial->Shininess = 0.5f;
 
 		}
 
+		Material::Sptr WhiteBlackSpecMaterial = ResourceManager::CreateAsset<Material>();
+		{
+			WhiteBlackSpecMaterial->Name = "BlackWhiteBox";
+			WhiteBlackSpecMaterial->MatShader = reflectiveBWshader;
+			WhiteBlackSpecMaterial->Texture = boxTexture;
+			WhiteBlackSpecMaterial->SpecTexture = UnknownBW;
+		}
 		// Create some lights for our scene
 		scene->Lights.resize(3);
-		scene->Lights[0].Position = glm::vec3(0.0f, 0.0f, 10.0f);
+		scene->Lights[0].Position = glm::vec3(0.0f, 1.0f, 3.0f);
 		scene->Lights[0].Color = glm::vec3(1.0f, 1.0f, 1.0f);
-		scene->Lights[0].Range = 300.0f;
+		scene->Lights[0].Range = 100.0f;
 
-	//	scene->Lights[1].Position = glm::vec3(1.0f, 0.0f, 3.0f);
-	//	scene->Lights[1].Color = glm::vec3(0.2f, 0.8f, 0.1f);
+		scene->Lights[1].Position = glm::vec3(1.0f, 0.0f, 3.0f);
+		scene->Lights[1].Color = glm::vec3(0.2f, 0.8f, 0.1f);
 
-		//scene->Lights[2].Position = glm::vec3(0.0f, 1.0f, 3.0f);
-	//	scene->Lights[2].Color = glm::vec3(1.0f, 0.2f, 0.1f);
+		scene->Lights[2].Position = glm::vec3(0.0f, 1.0f, 3.0f);
+		scene->Lights[2].Color = glm::vec3(1.0f, 0.2f, 0.1f);
 
 		// We'll create a mesh that is a simple plane that we can resize later
 		MeshResource::Sptr planeMesh = ResourceManager::CreateAsset<MeshResource>();
@@ -323,12 +357,12 @@ int main() {
 		// Set up the scene's camera
 		GameObject::Sptr camera = scene->CreateGameObject("Main Camera");
 		{
-			camera->SetPostion(glm::vec3(0, 0, 5));
+			camera->SetPostion(glm::vec3(5.0f));
 			camera->LookAt(glm::vec3(0.0f));
-			camera->SetRotation(glm::vec3(0.0f, 0.0f, 0.0f));
+
+			camera->Add<SimpleCameraControl>();
 
 			Camera::Sptr cam = camera->Add<Camera>();
-
 			// Make sure that the camera is set as the scene's main camera!
 			scene->MainCamera = cam;
 		}
@@ -336,31 +370,33 @@ int main() {
 		// Set up all our sample objects
 		GameObject::Sptr plane = scene->CreateGameObject("Plane");
 		{
-			// Scale up the plane
-			plane->SetScale(glm::vec3(10.0F));
-
+			// Make a big tiled mesh
+			MeshResource::Sptr tiledMesh = ResourceManager::CreateAsset<MeshResource>();
+			tiledMesh->AddParam(MeshBuilderParam::CreatePlane(ZERO, UNIT_Z, UNIT_X, glm::vec2(100.0f), glm::vec2(20.0f)));
+			tiledMesh->GenerateMesh();
 
 			// Create and attach a RenderComponent to the object to draw our mesh
 			RenderComponent::Sptr renderer = plane->Add<RenderComponent>();
-			renderer->SetMesh(planeMesh);
+			renderer->SetMesh(tiledMesh);
 			renderer->SetMaterial(boxMaterial);
 
 			// Attach a plane collider that extends infinitely along the X/Y axis
 			RigidBody::Sptr physics = plane->Add<RigidBody>(/*static by default*/);
-			physics->AddCollider(PlaneCollider::Create());
+			physics->AddCollider(BoxCollider::Create(glm::vec3(50.0f, 50.0f, 1.0f)))->SetPosition({0,0,-1});
 		}
 
 		GameObject::Sptr square = scene->CreateGameObject("Square");
 		{
 			// Set position in the scene
-			square->SetPostion(glm::vec3(0.0f, 0.0f, 2.0f));
+			square->SetPostion(glm::vec3(4.5f, 4.5f, 4.5f));
+			square->SetRotation(glm::vec3(0.0f, 45.0f, 0.0f));
 			// Scale down the plane
-			square->SetScale(glm::vec3(0.5f));
+			square->SetScale(glm::vec3(0.8f));
 
 			// Create and attach a render component
 			RenderComponent::Sptr renderer = square->Add<RenderComponent>();
 			renderer->SetMesh(planeMesh);
-			renderer->SetMaterial(boxMaterial);
+			renderer->SetMaterial(WhiteBlackSpecMaterial);
 
 			// This object is a renderable only, it doesn't have any behaviours or
 			// physics bodies attached!
@@ -368,9 +404,8 @@ int main() {
 
 		GameObject::Sptr monkey1 = scene->CreateGameObject("Monkey 1");
 		{
-			
 			// Set position in the scene
-			monkey1->SetPostion(glm::vec3(MoveX, MoveY, 1.0f));
+			monkey1->SetPostion(glm::vec3(1.5f, 0.0f, 1.0f));
 
 			// Add some behaviour that relies on the physics body
 			monkey1->Add<JumpBehaviour>();
@@ -383,12 +418,6 @@ int main() {
 			// Add a dynamic rigid body to this monkey
 			RigidBody::Sptr physics = monkey1->Add<RigidBody>(RigidBodyType::Dynamic);
 			physics->AddCollider(ConvexMeshCollider::Create());
-
-
-			// We'll add a behaviour that will interact with our trigger volumes
-			MaterialSwapBehaviour::Sptr triggerInteraction = monkey1->Add<MaterialSwapBehaviour>();
-			triggerInteraction->EnterMaterial = boxMaterial;
-			triggerInteraction->ExitMaterial = monkeyMaterial;
 		}
 
 		GameObject::Sptr monkey2 = scene->CreateGameObject("Complex Object");
@@ -419,7 +448,13 @@ int main() {
 			BoxCollider::Sptr collider = BoxCollider::Create(glm::vec3(3.0f, 3.0f, 1.0f));
 			collider->SetPosition(glm::vec3(0.0f, 0.0f, 0.5f));
 			volume->AddCollider(collider);
+
+			trigger->Add<TriggerVolumeEnterBehaviour>();
 		}
+
+		// Call scene awake to start up all of our components
+		scene->Window = window;
+		scene->Awake();
 
 		// Save the asset manifest for all the resources we just loaded
 		ResourceManager::SaveManifest("manifest.json");
@@ -427,9 +462,6 @@ int main() {
 		scene->Save("scene.json");
 	}
 
-	// Call scene awake to start up all of our components
-	scene->Window = window;
-	scene->Awake();
 
 	// We'll use this to allow editing the save/load path
 	// via ImGui, note the reserve to allocate extra space
@@ -560,8 +592,25 @@ int main() {
 		Material::Sptr currentMat = nullptr;
 		Shader::Sptr shader = nullptr;
 
+		TextureCube::Sptr environment = scene->GetSkyboxTexture();
+		if (environment) environment->Bind(0); 
+
 		// Render all our objects
 		ComponentManager::Each<RenderComponent>([&](const RenderComponent::Sptr& renderable) {
+			// Early bail if mesh not set
+			if (renderable->GetMesh() == nullptr) { 
+				return;
+			}
+
+			// If we don't have a material, try getting the scene's fallback material
+			// If none exists, do not draw anything
+			if (renderable->GetMaterial() == nullptr) {
+				if (scene->DefaultMaterial != nullptr) {
+					renderable->SetMaterial(scene->DefaultMaterial);
+				} else {
+					return;
+				}
+			}
 
 			// If the material has changed, we need to bind the new shader and set up our material and frame data
 			// Note: This is a good reason why we should be sorting the render components in ComponentManager
@@ -581,15 +630,18 @@ int main() {
 			shader->SetUniformMatrix("u_ModelViewProjection", viewProj * object->GetTransform());
 			shader->SetUniformMatrix("u_Model", object->GetTransform());
 			shader->SetUniformMatrix("u_NormalMatrix", glm::mat3(glm::transpose(glm::inverse(object->GetTransform()))));
+
 			// Draw the object
 			renderable->GetMesh()->Draw();
 		});
+
+		// Use our cubemap to draw our skybox
+		scene->DrawSkybox();
 
 
 		// End our ImGui window
 		ImGui::End();
 
-		
 		VertexArrayObject::Unbind();
 
 		lastFrame = thisFrame;
