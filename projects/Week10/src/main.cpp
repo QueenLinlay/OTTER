@@ -62,6 +62,7 @@
 #include "Graphics/DebugDraw.h"
 #include "Gameplay/Components/TriggerVolumeEnterBehaviour.h"
 #include "Gameplay/Components/SimpleCameraControl.h"
+#include "Gameplay/Physics/Colliders/CylinderCollider.h"
 
 //#define LOG_GL_NOTIFICATIONS
 
@@ -213,6 +214,347 @@ bool DrawLightImGui(const Scene::Sptr& scene, const char* title, int ix) {
 	return result;
 }
 
+/// <summary>
+/// Draws a simple window for displaying materials and their editors
+/// </summary>
+void DrawMaterialsWindow() {
+	if (ImGui::Begin("Materials")) {
+		ResourceManager::Each<Material>([](Material::Sptr material) {
+			material->RenderImGui();
+		});
+	}
+	ImGui::End();
+}
+
+/// <summary>
+/// handles creating or loading the scene
+/// </summary>
+void CreateScene() {
+	bool loadScene = false;  
+	// For now we can use a toggle to generate our scene vs load from file
+	if (loadScene) {
+		ResourceManager::LoadManifest("manifest.json");
+		scene = Scene::Load("scene.json");
+
+		// Call scene awake to start up all of our components
+		scene->Window = window;
+		scene->Awake();
+	} 
+	else {  
+		// This time we'll have 2 different shaders, and share data between both of them using the UBO
+		// This shader will handle reflective materials 
+		Shader::Sptr reflectiveShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shaders/basic.glsl" },
+			{ ShaderPartType::Fragment, "shaders/fragment_shaders/frag_environment_reflective.glsl" }
+		});
+
+		// This shader handles our basic materials without reflections (cause they expensive)
+		Shader::Sptr basicShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shaders/basic.glsl" },
+			{ ShaderPartType::Fragment, "shaders/fragment_shaders/frag_blinn_phong_textured.glsl" }
+		});
+
+		// This shader handles our basic materials without reflections (cause they expensive)
+		Shader::Sptr specShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shaders/basic.glsl" },
+			{ ShaderPartType::Fragment, "shaders/fragment_shaders/textured_specular.glsl" }
+		});
+		
+
+		///////////////////// NEW SHADERS ////////////////////////////////////////////
+
+		// This shader handles our foliage vertex shader example
+		Shader::Sptr foliageShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shaders/foliage.glsl" },
+			{ ShaderPartType::Fragment, "shaders/fragment_shaders/screendoor_transparency.glsl" }
+		});
+		
+		// This shader handles our cel shading example
+		Shader::Sptr toonShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shaders/basic.glsl" },
+			{ ShaderPartType::Fragment, "shaders/fragment_shaders/toon_shading.glsl" }
+		});
+		
+		// Hands-On new shader of vertex and frag
+		Shader::Sptr editShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shaders/basic_edit.glsl" },
+			{ ShaderPartType::Fragment, "shaders/fragment_shaders/frag_shader_edit.glsl" }
+		});
+		// Load in the meshes
+		MeshResource::Sptr monkeyMesh = ResourceManager::CreateAsset<MeshResource>("Monkey.obj");
+		MeshResource::Sptr PlanMesh = ResourceManager::CreateAsset<MeshResource>("Plane.obj");
+		
+		// Load in some textures
+		Texture2D::Sptr    boxTexture = ResourceManager::CreateAsset<Texture2D>("textures/box-diffuse.png");
+		Texture2D::Sptr    boxSpec    = ResourceManager::CreateAsset<Texture2D>("textures/box-specular.png");
+		Texture2D::Sptr    monkeyTex  = ResourceManager::CreateAsset<Texture2D>("textures/monkey-uvMap.png");
+		Texture2D::Sptr    leafTex    = ResourceManager::CreateAsset<Texture2D>("textures/leaves.png");
+		leafTex->SetMinFilter(MinFilter::Nearest);
+		leafTex->SetMagFilter(MagFilter::Nearest);
+
+		// Here we'll load in the cubemap, as well as a special shader to handle drawing the skybox
+		TextureCube::Sptr testCubemap = ResourceManager::CreateAsset<TextureCube>("cubemaps/ocean/ocean.jpg");
+		Shader::Sptr      skyboxShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
+			{ ShaderPartType::Vertex, "shaders/vertex_shaders/skybox_vert.glsl" },
+			{ ShaderPartType::Fragment, "shaders/fragment_shaders/skybox_frag.glsl" }
+		});
+
+		// Create an empty scene
+		scene = std::make_shared<Scene>();
+
+		// Setting up our enviroment map
+		scene->SetSkyboxTexture(testCubemap);
+		scene->SetSkyboxShader(skyboxShader);
+		// Since the skybox I used was for Y-up, we need to rotate it 90 deg around the X-axis to convert it to z-up
+		scene->SetSkyboxRotation(glm::rotate(MAT4_IDENTITY, glm::half_pi<float>(), glm::vec3(1.0f, 0.0f, 0.0f)));
+
+		// Create our materials
+		// This will be our box material, with no environment reflections
+		Material::Sptr boxMaterial = ResourceManager::CreateAsset<Material>(basicShader);
+		{
+			boxMaterial->Name = "Box";
+			boxMaterial->Set("u_Material.Diffuse", boxTexture);
+			boxMaterial->Set("u_Material.Shininess", 0.1f);
+		}
+		
+		Material::Sptr boxMaterialEdit = ResourceManager::CreateAsset<Material>(editShader);
+		{
+			boxMaterialEdit->Name = "BoxEdit";
+			boxMaterialEdit->Set("u_Material.Diffuse", boxTexture);
+			boxMaterialEdit->Set("u_Material.Shininess", 0.1f);
+		}
+		
+		// This will be the reflective material, we'll make the whole thing 90% reflective
+		Material::Sptr monkeyMaterial = ResourceManager::CreateAsset<Material>(reflectiveShader);
+		{
+			monkeyMaterial->Name = "Monkey";
+			monkeyMaterial->Set("u_Material.Diffuse", monkeyTex);
+			monkeyMaterial->Set("u_Material.Shininess", 0.5f);
+		}
+
+		// This will be the reflective material, we'll make the whole thing 90% reflective
+		Material::Sptr testMaterial = ResourceManager::CreateAsset<Material>(specShader);
+		{
+			testMaterial->Name = "Box-Specular";
+			testMaterial->Set("u_Material.Diffuse", boxTexture);
+			testMaterial->Set("u_Material.Specular", boxSpec);
+		}
+
+		/////////////// NEW MATERIALS ////////////////////
+
+		// Our foliage vertex shader material
+		Material::Sptr foliageMaterial = ResourceManager::CreateAsset<Material>(foliageShader);
+		{
+			foliageMaterial->Name = "Foliage Shader";
+			foliageMaterial->Set("u_Material.Diffuse", leafTex);
+			foliageMaterial->Set("u_Material.Shininess", 0.1f);
+			foliageMaterial->Set("u_Material.Threshold", 0.1f);
+
+			foliageMaterial->Set("u_WindDirection", glm::vec3(1.0f, 1.0f, 0.0f));
+			foliageMaterial->Set("u_WindStrength",  0.5f);
+			foliageMaterial->Set("u_VerticalScale", 1.0f);
+			foliageMaterial->Set("u_WindSpeed",     1.0f);
+		}
+
+		// Our toon shader material
+		Material::Sptr toonMaterial = ResourceManager::CreateAsset<Material>(toonShader);
+		{
+			toonMaterial->Name = "Toon";
+			toonMaterial->Set("u_Material.Diffuse", boxTexture);
+			toonMaterial->Set("u_Material.Shininess", 0.1f);
+			toonMaterial->Set("u_Material.Steps", 8);
+		}
+
+		// Create some lights for our scene
+		scene->Lights.resize(3);
+		scene->Lights[0].Position = glm::vec3(0.0f, 1.0f, 3.0f);
+		scene->Lights[0].Color = glm::vec3(1.0f, 1.0f, 1.0f);
+		scene->Lights[0].Range = 100.0f;
+
+		scene->Lights[1].Position = glm::vec3(1.0f, 0.0f, 3.0f);
+		scene->Lights[1].Color = glm::vec3(0.2f, 0.8f, 0.1f);
+
+		scene->Lights[2].Position = glm::vec3(0.0f, 1.0f, 3.0f);
+		scene->Lights[2].Color = glm::vec3(1.0f, 0.2f, 0.1f);
+
+		// We'll create a mesh that is a simple plane that we can resize later
+		MeshResource::Sptr planeMesh = ResourceManager::CreateAsset<MeshResource>();
+		planeMesh->AddParam(MeshBuilderParam::CreatePlane(ZERO, UNIT_Z, UNIT_X, glm::vec2(1.0f)));
+		planeMesh->GenerateMesh();
+
+		// Set up the scene's camera
+		GameObject::Sptr camera = scene->CreateGameObject("Main Camera");
+		{
+			camera->SetPostion(glm::vec3(5.0f));
+			camera->LookAt(glm::vec3(0.0f));
+
+			camera->Add<SimpleCameraControl>();
+
+			Camera::Sptr cam = camera->Add<Camera>();
+			// Make sure that the camera is set as the scene's main camera!
+			scene->MainCamera = cam;
+		}
+
+		// Set up all our sample objects
+		GameObject::Sptr plane = scene->CreateGameObject("Plane");
+		{
+			// Make a big tiled mesh
+			MeshResource::Sptr tiledMesh = ResourceManager::CreateAsset<MeshResource>();
+			tiledMesh->AddParam(MeshBuilderParam::CreatePlane(ZERO, UNIT_Z, UNIT_X, glm::vec2(100.0f), glm::vec2(20.0f)));
+			tiledMesh->GenerateMesh();
+
+			// Create and attach a RenderComponent to the object to draw our mesh
+			RenderComponent::Sptr renderer = plane->Add<RenderComponent>();
+			renderer->SetMesh(tiledMesh);
+			renderer->SetMaterial(boxMaterial);
+
+			// Attach a plane collider that extends infinitely along the X/Y axis
+			RigidBody::Sptr physics = plane->Add<RigidBody>(/*static by default*/);
+			physics->AddCollider(BoxCollider::Create(glm::vec3(50.0f, 50.0f, 1.0f)))->SetPosition({ 0,0,-1 });
+		}
+
+		GameObject::Sptr monkey1 = scene->CreateGameObject("Monkey 1");
+		{
+			// Set position in the scene
+			monkey1->SetPostion(glm::vec3(1.5f, 0.0f, 1.0f));
+
+			// Add some behaviour that relies on the physics body
+			monkey1->Add<JumpBehaviour>();
+
+			// Create and attach a renderer for the monkey
+			RenderComponent::Sptr renderer = monkey1->Add<RenderComponent>();
+			renderer->SetMesh(monkeyMesh);
+			renderer->SetMaterial(monkeyMaterial);
+
+			// Add a dynamic rigid body to this monkey
+			RigidBody::Sptr physics = monkey1->Add<RigidBody>(RigidBodyType::Dynamic);
+			physics->AddCollider(ConvexMeshCollider::Create());
+		}
+
+		GameObject::Sptr square = scene->CreateGameObject("SquareFlat");
+		{
+			// Set position in the scene
+			square->SetPostion(glm::vec3(-0.450f, 1.140f, 1.820f));
+			square->SetRotation(glm::vec3(0.0f, 45.0f, 0.0f));
+
+			// Create and attach a render component
+			RenderComponent::Sptr renderers = square->Add<RenderComponent>();
+			renderers->SetMesh(PlanMesh);
+			renderers->SetMaterial(boxMaterialEdit);
+			
+			// This object is a renderable only, it doesn't have any behaviours or
+			// physics bodies attached!
+		}
+
+		GameObject::Sptr monkey2 = scene->CreateGameObject("Complex Object");
+		{
+			// Set and rotation position in the scene
+			monkey2->SetPostion(glm::vec3(-1.5f, 0.0f, 1.0f));
+			monkey2->SetRotation(glm::vec3(90.0f, 0.0f, 0.0f));
+
+			// Add a render component
+			RenderComponent::Sptr renderer = monkey2->Add<RenderComponent>();
+			renderer->SetMesh(monkeyMesh);
+			renderer->SetMaterial(boxMaterial);
+
+			// This is an example of attaching a component and setting some parameters
+			RotatingBehaviour::Sptr behaviour = monkey2->Add<RotatingBehaviour>();
+			behaviour->RotationSpeed = glm::vec3(0.0f, 0.0f, -90.0f);
+		}
+
+		// Box to showcase the specular material
+		GameObject::Sptr specBox = scene->CreateGameObject("Specular Object");
+		{
+			MeshResource::Sptr boxMesh = ResourceManager::CreateAsset<MeshResource>();
+			boxMesh->AddParam(MeshBuilderParam::CreateCube(ZERO, ONE));
+			boxMesh->GenerateMesh();
+
+			// Set and rotation position in the scene
+			specBox->SetPostion(glm::vec3(0, -4.0f, 1.0f));
+
+			// Add a render component
+			RenderComponent::Sptr renderer = specBox->Add<RenderComponent>();
+			renderer->SetMesh(boxMesh);
+			renderer->SetMaterial(testMaterial);
+		}
+
+		///// NEW OBJECTS ////
+
+		// sphere to showcase the foliage material
+		GameObject::Sptr foliageBall = scene->CreateGameObject("Foliage Sphere");
+		{
+			MeshResource::Sptr sphere = ResourceManager::CreateAsset<MeshResource>();
+			sphere->AddParam(MeshBuilderParam::CreateIcoSphere(ZERO, ONE, 8));
+			sphere->GenerateMesh(); 
+
+			// Set and rotation position in the scene
+			foliageBall->SetPostion(glm::vec3(-4.0f, -4.0f, 1.0f));
+
+			// Add a render component
+			RenderComponent::Sptr renderer = foliageBall->Add<RenderComponent>();
+			renderer->SetMesh(sphere);
+			renderer->SetMaterial(foliageMaterial);
+		}
+
+		// Box to showcase the foliage material
+		GameObject::Sptr foliageBox = scene->CreateGameObject("Foliage Box");
+		{
+			MeshResource::Sptr box = ResourceManager::CreateAsset<MeshResource>();
+			box->AddParam(MeshBuilderParam::CreateCube(glm::vec3(0, 0, 0.5f) , ONE));
+			box->GenerateMesh();
+
+			// Set and rotation position in the scene
+			foliageBox->SetPostion(glm::vec3(-6.0f, -4.0f, 1.0f));
+
+			// Add a render component
+			RenderComponent::Sptr renderer = foliageBox->Add<RenderComponent>();
+			renderer->SetMesh(box);
+			renderer->SetMaterial(foliageMaterial);
+		}
+
+		// Box to showcase the specular material
+		GameObject::Sptr toonBall = scene->CreateGameObject("Toon Object");
+		{
+			MeshResource::Sptr sphere = ResourceManager::CreateAsset<MeshResource>();
+			sphere->AddParam(MeshBuilderParam::CreateIcoSphere(ZERO, ONE, 8));
+			sphere->GenerateMesh();
+
+			// Set and rotation position in the scene
+			toonBall->SetPostion(glm::vec3(-2.0f, -4.0f, 1.0f));
+
+			// Add a render component
+			RenderComponent::Sptr renderer = toonBall->Add<RenderComponent>();
+			renderer->SetMesh(sphere);
+			renderer->SetMaterial(toonMaterial);
+		}
+
+		// Kinematic rigid bodies are those controlled by some outside controller
+		// and ONLY collide with dynamic objects
+		RigidBody::Sptr physics = monkey2->Add<RigidBody>(RigidBodyType::Kinematic);
+		physics->AddCollider(ConvexMeshCollider::Create());
+
+		// Create a trigger volume for testing how we can detect collisions with objects!
+		GameObject::Sptr trigger = scene->CreateGameObject("Trigger");
+		{
+			TriggerVolume::Sptr volume = trigger->Add<TriggerVolume>();
+			CylinderCollider::Sptr collider = CylinderCollider::Create(glm::vec3(3.0f, 3.0f, 1.0f));
+			collider->SetPosition(glm::vec3(0.0f, 0.0f, 0.5f));
+			volume->AddCollider(collider);
+
+			trigger->Add<TriggerVolumeEnterBehaviour>();
+		}
+
+		// Call scene awake to start up all of our components
+		scene->Window = window;
+		scene->Awake();
+
+		// Save the asset manifest for all the resources we just loaded
+		ResourceManager::SaveManifest("manifest.json");
+		// Save the scene to a JSON file
+		scene->Save("scene.json");
+	}
+}
+
 int main() {
 	Logger::Init(); // We'll borrow the logger from the toolkit, but we need to initialize it
 
@@ -259,213 +601,48 @@ int main() {
 	glCullFace(GL_BACK);
 	glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
 
-	bool loadScene = false;
-	// For now we can use a toggle to generate our scene vs load from file
-	if (loadScene) {
-		ResourceManager::LoadManifest("manifest.json");
-		scene = Scene::Load("scene.json");
+	// Structure for our frame-level uniforms, matches layout from
+	// fragments/frame_uniforms.glsl
+	// For use with a UBO.
+	struct FrameLevelUniforms {
+		// The camera's view matrix
+		glm::mat4 u_View;
+		// The camera's projection matrix
+		glm::mat4 u_Projection;
+		// The combined viewProject matrix
+		glm::mat4 u_ViewProjection;
+		// The camera's position in world space
+		glm::vec4 u_CameraPos;
+		// The time in seconds since the start of the application
+		float u_Time;
+	};
+	// This uniform buffer will hold all our frame level uniforms, to be shared between shaders
+	UniformBuffer<FrameLevelUniforms>::Sptr frameUniforms = std::make_shared<UniformBuffer<FrameLevelUniforms>>(BufferUsage::DynamicDraw);
+	// The slot that we'll bind our frame level UBO to
+	const int FRAME_UBO_BINDING = 0;
 
-		// Call scene awake to start up all of our components
-		scene->Window = window;
-		scene->Awake();
-	} 
-	else {
-		// This time we'll have 2 different shaders, and share data between both of them using the UBO
-		// This shader will handle reflective materials
-		Shader::Sptr reflectiveShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
-			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" },  
-			{ ShaderPartType::Fragment, "shaders/frag_environment_reflective.glsl" }  
-		}); 
-		
-		// This shader handles our basic materials without reflections (cause they expensive)
-		Shader::Sptr basicShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
-			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" },
-			{ ShaderPartType::Fragment, "shaders/frag_blinn_phong_textured.glsl" }
-		});
-		
-		//Black and White refection none;
-		Shader::Sptr reflectiveBWshader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
-			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" },
-			{ ShaderPartType::Fragment, "shaders/frag_environment_reflective_Mine.glsl" }
-		});
+	// Structure for our isntance-level uniforms, matches layout from
+	// fragments/frame_uniforms.glsl
+	// For use with a UBO.
+	struct InstanceLevelUniforms {
+		// Complete MVP
+		glm::mat4 u_ModelViewProjection;
+		// Just the model transform, we'll do worldspace lighting
+		glm::mat4 u_Model;
+		// Normal Matrix for transforming normals
+		glm::mat4 u_NormalMatrix;
+	};
 
-		MeshResource::Sptr monkeyMesh = ResourceManager::CreateAsset<MeshResource>("Monkey.obj");
-		Texture2D::Sptr    boxTexture = ResourceManager::CreateAsset<Texture2D>("textures/box-diffuse.png");
-		Texture2D::Sptr    monkeyTex  = ResourceManager::CreateAsset<Texture2D>("textures/monkey-uvMap.png");  
-		Texture2D::Sptr    UnknownBW = ResourceManager::CreateAsset<Texture2D>("textures/box-specular.png");
+	// This uniform buffer will hold all our instance level uniforms, to be shared between shaders
+	UniformBuffer<InstanceLevelUniforms>::Sptr instanceUniforms = std::make_shared<UniformBuffer<InstanceLevelUniforms>>(BufferUsage::DynamicDraw);
 
-		Shader::Sptr normal = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
-			{ ShaderPartType::Vertex, "shaders/vertex_shader.glsl" },
-			{ ShaderPartType::Fragment, "shaders/frag_shader.glsl" }
-		});
-		// Here we'll load in the cubemap, as well as a special shader to handle drawing the skybox
-		TextureCube::Sptr testCubemap = ResourceManager::CreateAsset<TextureCube>("cubemaps/ocean/ocean.jpg");
-		Shader::Sptr      skyboxShader = ResourceManager::CreateAsset<Shader>(std::unordered_map<ShaderPartType, std::string>{
-			{ ShaderPartType::Vertex, "shaders/skybox_vert.glsl" },
-			{ ShaderPartType::Fragment, "shaders/skybox_frag.glsl" }
-		});   
-		 
-		// Create an empty scene
-		scene = std::make_shared<Scene>();
+	// The slot that we'll bind our instance level UBO to
+	const int INSTANCE_UBO_BINDING = 1;
 
-		// Setting up our enviroment map
-		scene->SetSkyboxTexture(testCubemap);
-		scene->SetSkyboxShader(skyboxShader);
-		// Since the skybox I used was for Y-up, we need to rotate it 90 deg around the X-axis to convert it to z-up
-		scene->SetSkyboxRotation(glm::rotate(MAT4_IDENTITY, glm::half_pi<float>(), glm::vec3(1.0f, 0.0f, 0.0f)));
-
-		// Create our materials
-		// This will be our box material, with no environment reflections
-		Material::Sptr boxMaterial = ResourceManager::CreateAsset<Material>();
-		{
-			boxMaterial->Name = "Box";
-			boxMaterial->MatShader = basicShader; 
-			boxMaterial->Texture = boxTexture;
-			boxMaterial->Shininess = 0.1f;  
-		}	
-		 
-		// This will be the reflective material, we'll make the whole thing 90% reflective
-		Material::Sptr monkeyMaterial = ResourceManager::CreateAsset<Material>();
-		{
-			monkeyMaterial->Name = "Monkey";
-			monkeyMaterial->MatShader = normal;
-			monkeyMaterial->Texture = monkeyTex; 
-			monkeyMaterial->Shininess = 0.5f;
-
-		}
-
-		Material::Sptr WhiteBlackSpecMaterial = ResourceManager::CreateAsset<Material>();
-		{
-			WhiteBlackSpecMaterial->Name = "BlackWhiteBox";
-			WhiteBlackSpecMaterial->MatShader = reflectiveBWshader;
-			WhiteBlackSpecMaterial->Texture = boxTexture;
-			WhiteBlackSpecMaterial->SpecTexture = UnknownBW;
-		}
-		// Create some lights for our scene
-		scene->Lights.resize(3);
-		scene->Lights[0].Position = glm::vec3(0.0f, 1.0f, 3.0f);
-		scene->Lights[0].Color = glm::vec3(1.0f, 1.0f, 1.0f);
-		scene->Lights[0].Range = 100.0f;
-
-		scene->Lights[1].Position = glm::vec3(1.0f, 0.0f, 3.0f);
-		scene->Lights[1].Color = glm::vec3(0.2f, 0.8f, 0.1f);
-
-		scene->Lights[2].Position = glm::vec3(0.0f, 1.0f, 3.0f);
-		scene->Lights[2].Color = glm::vec3(1.0f, 0.2f, 0.1f);
-
-		// We'll create a mesh that is a simple plane that we can resize later
-		MeshResource::Sptr planeMesh = ResourceManager::CreateAsset<MeshResource>();
-		planeMesh->AddParam(MeshBuilderParam::CreatePlane(ZERO, UNIT_Z, UNIT_X, glm::vec2(1.0f)));
-		planeMesh->GenerateMesh();
-
-		// Set up the scene's camera
-		GameObject::Sptr camera = scene->CreateGameObject("Main Camera");
-		{
-			camera->SetPostion(glm::vec3(5.0f));
-			camera->LookAt(glm::vec3(0.0f));
-
-			camera->Add<SimpleCameraControl>();
-
-			Camera::Sptr cam = camera->Add<Camera>();
-			// Make sure that the camera is set as the scene's main camera!
-			scene->MainCamera = cam;
-		}
-		
-		// Set up all our sample objects
-		GameObject::Sptr plane = scene->CreateGameObject("Plane");
-		{
-			// Make a big tiled mesh
-			MeshResource::Sptr tiledMesh = ResourceManager::CreateAsset<MeshResource>();
-			tiledMesh->AddParam(MeshBuilderParam::CreatePlane(ZERO, UNIT_Z, UNIT_X, glm::vec2(100.0f), glm::vec2(20.0f)));
-			tiledMesh->GenerateMesh();
-
-			// Create and attach a RenderComponent to the object to draw our mesh
-			RenderComponent::Sptr renderer = plane->Add<RenderComponent>();
-			renderer->SetMesh(tiledMesh);
-			renderer->SetMaterial(boxMaterial);
-
-			// Attach a plane collider that extends infinitely along the X/Y axis
-			RigidBody::Sptr physics = plane->Add<RigidBody>(/*static by default*/);
-			physics->AddCollider(BoxCollider::Create(glm::vec3(50.0f, 50.0f, 1.0f)))->SetPosition({0,0,-1});
-		}
-
-		GameObject::Sptr square = scene->CreateGameObject("Square");
-		{
-			// Set position in the scene
-			square->SetPostion(glm::vec3(4.5f, 4.5f, 4.5f));
-			square->SetRotation(glm::vec3(0.0f, 45.0f, 0.0f));
-			// Scale down the plane
-			square->SetScale(glm::vec3(0.8f));
-
-			// Create and attach a render component
-			RenderComponent::Sptr renderer = square->Add<RenderComponent>();
-			renderer->SetMesh(planeMesh);
-			renderer->SetMaterial(WhiteBlackSpecMaterial);
-
-			// This object is a renderable only, it doesn't have any behaviours or
-			// physics bodies attached!
-		}
-
-		GameObject::Sptr monkey1 = scene->CreateGameObject("Monkey 1");
-		{
-			// Set position in the scene
-			monkey1->SetPostion(glm::vec3(1.5f, 0.0f, 1.0f));
-
-			// Add some behaviour that relies on the physics body
-			monkey1->Add<JumpBehaviour>();
-
-			// Create and attach a renderer for the monkey
-			RenderComponent::Sptr renderer = monkey1->Add<RenderComponent>();
-			renderer->SetMesh(monkeyMesh);
-			renderer->SetMaterial(monkeyMaterial);
-
-			// Add a dynamic rigid body to this monkey
-			RigidBody::Sptr physics = monkey1->Add<RigidBody>(RigidBodyType::Dynamic);
-			physics->AddCollider(ConvexMeshCollider::Create());
-		}
-
-		GameObject::Sptr monkey2 = scene->CreateGameObject("Complex Object");
-		{
-			// Set and rotation position in the scene
-			monkey2->SetPostion(glm::vec3(-1.5f, 0.0f, 1.0f));
-			monkey2->SetRotation(glm::vec3(90.0f, 0.0f, 0.0f));
-
-			// Add a render component
-			RenderComponent::Sptr renderer = monkey2->Add<RenderComponent>();
-			renderer->SetMesh(monkeyMesh);
-			renderer->SetMaterial(boxMaterial);
-
-			// This is an example of attaching a component and setting some parameters
-			RotatingBehaviour::Sptr behaviour = monkey2->Add<RotatingBehaviour>();
-			behaviour->RotationSpeed = glm::vec3(0.0f, 0.0f, -90.0f);
-		}
-
-		// Kinematic rigid bodies are those controlled by some outside controller
-		// and ONLY collide with dynamic objects
-		RigidBody::Sptr physics = monkey2->Add<RigidBody>(RigidBodyType::Kinematic);
-		physics->AddCollider(ConvexMeshCollider::Create());
-
-		// Create a trigger volume for testing how we can detect collisions with objects!
-		GameObject::Sptr trigger = scene->CreateGameObject("Trigger"); 
-		{
-			TriggerVolume::Sptr volume = trigger->Add<TriggerVolume>();
-			BoxCollider::Sptr collider = BoxCollider::Create(glm::vec3(3.0f, 3.0f, 1.0f));
-			collider->SetPosition(glm::vec3(0.0f, 0.0f, 0.5f));
-			volume->AddCollider(collider);
-
-			trigger->Add<TriggerVolumeEnterBehaviour>();
-		}
-
-		// Call scene awake to start up all of our components
-		scene->Window = window;
-		scene->Awake();
-
-		// Save the asset manifest for all the resources we just loaded
-		ResourceManager::SaveManifest("manifest.json");
-		// Save the scene to a JSON file
-		scene->Save("scene.json");
-	}
-
+	////////////////////////////////
+	///// SCENE CREATION MOVED /////
+	////////////////////////////////
+	CreateScene();
 
 	// We'll use this to allow editing the save/load path
 	// via ImGui, note the reserve to allocate extra space
@@ -473,12 +650,8 @@ int main() {
 	std::string scenePath = "scene.json"; 
 	scenePath.reserve(256); 
 
-	bool isRotating = true;
-	float rotateSpeed = 90.0f;
-
 	// Our high-precision timer
 	double lastFrame = glfwGetTime();
-
 
 	BulletDebugMode physicsDebugMode = BulletDebugMode::None;
 	float playbackSpeed = 1.0f;
@@ -493,6 +666,9 @@ int main() {
 		// Calculate the time since our last frame (dt)
 		double thisFrame = glfwGetTime();
 		float dt = static_cast<float>(thisFrame - lastFrame);
+
+		// Draw our material properties window!
+		DrawMaterialsWindow();
 
 		// Showcasing how to use the imGui library!
 		bool isDebugWindowOpen = ImGui::Begin("Debugging");
@@ -544,8 +720,6 @@ int main() {
 		// Clear the color and depth buffers
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-		// Update our application level uniforms every frame
-
 		// Draw some ImGui stuff for the lights
 		if (isDebugWindowOpen) {
 			for (int ix = 0; ix < scene->Lights.size(); ix++) {
@@ -596,8 +770,24 @@ int main() {
 		Material::Sptr currentMat = nullptr;
 		Shader::Sptr shader = nullptr;
 
+		// Bind the skybox texture to a reserved texture slot
+		// See Material.h and Material.cpp for how we're reserving texture slots
 		TextureCube::Sptr environment = scene->GetSkyboxTexture();
 		if (environment) environment->Bind(0); 
+
+		// Here we'll bind all the UBOs to their corresponding slots
+		scene->PreRender();
+		frameUniforms->Bind(FRAME_UBO_BINDING);
+		instanceUniforms->Bind(INSTANCE_UBO_BINDING);
+
+		// Upload frame level uniforms
+		auto& frameData = frameUniforms->GetData();
+		frameData.u_Projection = camera->GetProjection();
+		frameData.u_View = camera->GetView();
+		frameData.u_ViewProjection = camera->GetViewProjection();
+		frameData.u_CameraPos = glm::vec4(camera->GetGameObject()->GetPosition(), 1.0f);
+		frameData.u_Time = static_cast<float>(thisFrame);
+		frameUniforms->Update();
 
 		// Render all our objects
 		ComponentManager::Each<RenderComponent>([&](const RenderComponent::Sptr& renderable) {
@@ -620,20 +810,21 @@ int main() {
 			// Note: This is a good reason why we should be sorting the render components in ComponentManager
 			if (renderable->GetMaterial() != currentMat) {
 				currentMat = renderable->GetMaterial();
-				shader = currentMat->MatShader;
+				shader = currentMat->GetShader();
 
 				shader->Bind();
-				shader->SetUniform("u_CamPos", scene->MainCamera->GetGameObject()->GetPosition());
 				currentMat->Apply();
 			}
 
 			// Grab the game object so we can do some stuff with it
 			GameObject* object = renderable->GetGameObject();
-
-			// Set vertex shader parameters
-			shader->SetUniformMatrix("u_ModelViewProjection", viewProj * object->GetTransform());
-			shader->SetUniformMatrix("u_Model", object->GetTransform());
-			shader->SetUniformMatrix("u_NormalMatrix", glm::mat3(glm::transpose(glm::inverse(object->GetTransform()))));
+			 
+			// Use our uniform buffer for our instance level uniforms
+			auto& instanceData = instanceUniforms->GetData();
+			instanceData.u_Model = object->GetTransform();
+			instanceData.u_ModelViewProjection = viewProj * object->GetTransform();
+			instanceData.u_NormalMatrix = glm::mat3(glm::transpose(glm::inverse(object->GetTransform())));
+			instanceUniforms->Update();  
 
 			// Draw the object
 			renderable->GetMesh()->Draw();
@@ -641,7 +832,6 @@ int main() {
 
 		// Use our cubemap to draw our skybox
 		scene->DrawSkybox();
-
 
 		// End our ImGui window
 		ImGui::End();
